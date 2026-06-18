@@ -2,14 +2,14 @@ from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
 from app.database import get_db
-from app.models import Store, Locker, Order, FeeItem, OrderLog, LockerSize, LockerStatus, OrderStatus
+from app.models import Store, Locker, Order, OrderLog, LockerSize, LockerStatus, OrderStatus, FeeType
 from app.schemas import (
     StoreOut, LockerOut, OrderCreate, OrderOut, FeeItemOut,
-    PhoneUpdate, TimeoutHandleResult, AvailableLockerQuery,
+    PhoneUpdate, TimeoutHandleResult,
 )
 from app.init_db import generate_order_no, generate_code
+from app.services.utils import enrich_order_dict, get_base_price
 
 router = APIRouter(prefix="/user", tags=["用户端"])
 
@@ -17,8 +17,11 @@ DROP_TIMEOUT_HOURS = 2
 
 
 def _add_log(db: Session, order_id: int, action: str, detail: str = ""):
-    log = OrderLog(order_id=order_id, action=action, detail=detail)
-    db.add(log)
+    db.add(OrderLog(order_id=order_id, action=action, detail=detail))
+
+
+def _order_out(order) -> dict:
+    return enrich_order_dict(order)
 
 
 @router.get("/stores", response_model=list[StoreOut], summary="门店查询")
@@ -57,13 +60,12 @@ def create_order(req: OrderCreate, db: Session = Depends(get_db)):
     store = db.query(Store).filter(Store.id == req.store_id, Store.is_active == True).first()
     if not store:
         raise HTTPException(status_code=404, detail="门店不存在或已停用")
-    locker_q = db.query(Locker).filter(
+    locker = db.query(Locker).filter(
         Locker.store_id == req.store_id,
         Locker.size == req.locker_size,
         Locker.status == LockerStatus.available,
         Locker.is_abnormal == False,
-    )
-    locker = locker_q.with_for_update().first()
+    ).with_for_update().first()
     if not locker:
         raise HTTPException(status_code=409, detail="该门店无可用柜格")
     locker.status = LockerStatus.occupied
@@ -81,7 +83,7 @@ def create_order(req: OrderCreate, db: Session = Depends(get_db)):
     _add_log(db, order.id, "order_created", f"订单创建，分配柜格{locker.locker_no}")
     db.commit()
     db.refresh(order)
-    return order
+    return _order_out(order)
 
 
 @router.post("/orders/{order_id}/assign-locker", response_model=OrderOut, summary="分配柜格")
@@ -108,7 +110,7 @@ def assign_locker(order_id: int, locker_size: Optional[LockerSize] = None, db: S
     _add_log(db, order.id, "locker_assigned", f"分配柜格{locker.locker_no}")
     db.commit()
     db.refresh(order)
-    return order
+    return _order_out(order)
 
 
 @router.post("/orders/{order_id}/drop-code", response_model=OrderOut, summary="生成投递码")
@@ -125,7 +127,7 @@ def generate_drop_code(order_id: int, db: Session = Depends(get_db)):
         _add_log(db, order.id, "drop_code_generated", f"投递码已生成: {order.drop_code}")
     db.commit()
     db.refresh(order)
-    return order
+    return _order_out(order)
 
 
 @router.post("/orders/{order_id}/confirm-drop", response_model=OrderOut, summary="确认投递（用户输入投递码）")
@@ -142,7 +144,7 @@ def confirm_drop(order_id: int, drop_code: str, db: Session = Depends(get_db)):
     _add_log(db, order.id, "dropped", "用户已投递衣物到柜")
     db.commit()
     db.refresh(order)
-    return order
+    return _order_out(order)
 
 
 @router.post("/orders/{order_id}/record-pickup-code", response_model=OrderOut, summary="记录取件码")
@@ -156,7 +158,7 @@ def record_pickup_code(order_id: int, pickup_code: str, db: Session = Depends(ge
     _add_log(db, order.id, "pickup_code_recorded", f"取件码已记录: {pickup_code}")
     db.commit()
     db.refresh(order)
-    return order
+    return _order_out(order)
 
 
 @router.post("/orders/{order_id}/confirm-pickup", response_model=OrderOut, summary="确认取件（用户输入取件码）")
@@ -177,7 +179,7 @@ def confirm_pickup(order_id: int, pickup_code: str, db: Session = Depends(get_db
     _add_log(db, order.id, "picked_up", "用户已取件，柜格释放")
     db.commit()
     db.refresh(order)
-    return order
+    return _order_out(order)
 
 
 @router.get("/orders/{order_id}/estimate-fee", summary="计算预估费用")
@@ -190,22 +192,23 @@ def estimate_fee(order_id: int, db: Session = Depends(get_db)):
         size = locker.size if locker else LockerSize.medium
     else:
         size = LockerSize.medium
-    price_map = {
-        LockerSize.small: 29.0,
-        LockerSize.medium: 49.0,
-        LockerSize.large: 79.0,
-    }
-    base_fee = price_map.get(size, 49.0)
-    items = db.query(FeeItem).filter(FeeItem.order_id == order.id).all()
-    extra = sum(f.amount for f in items)
-    total = base_fee + extra
+    base_fee = get_base_price(size)
+    extra_fee = 0.0
+    discount_fee = 0.0
+    for f in order.fee_items:
+        if f.fee_type == FeeType.extra:
+            extra_fee += f.amount
+        elif f.fee_type == FeeType.discount:
+            discount_fee += abs(f.amount)
+    total = max(0.0, base_fee + extra_fee - discount_fee)
     return {
         "order_id": order.id,
         "order_no": order.order_no,
         "locker_size": size.value,
         "base_fee": base_fee,
-        "extra_fee": extra,
-        "estimated_total": total,
+        "extra_fee": round(extra_fee, 2),
+        "discount_fee": round(discount_fee, 2),
+        "estimated_total": round(total, 2),
     }
 
 
@@ -247,7 +250,7 @@ def cancel_order(order_id: int, db: Session = Depends(get_db)):
     _add_log(db, order.id, "cancelled", "订单已取消，柜格释放")
     db.commit()
     db.refresh(order)
-    return order
+    return _order_out(order)
 
 
 @router.patch("/orders/{order_id}/phone", response_model=OrderOut, summary="修改联系电话")
@@ -260,4 +263,4 @@ def update_phone(order_id: int, req: PhoneUpdate, db: Session = Depends(get_db))
     _add_log(db, order.id, "phone_updated", f"联系电话从{old_phone}修改为{req.user_phone}")
     db.commit()
     db.refresh(order)
-    return order
+    return _order_out(order)
