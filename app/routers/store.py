@@ -178,11 +178,38 @@ def mark_locker_abnormal(locker_id: int, req: MarkLockerAbnormalRequest, db: Ses
     return locker
 
 
-@router.post("/lockers/{locker_id}/restore", response_model=LockerOut, summary="恢复柜格可用")
+@router.post("/lockers/{locker_id}/restore", summary="恢复柜格可用")
 def restore_locker(locker_id: int, req: LockerRestoreRequest, db: Session = Depends(get_db)):
     locker = db.query(Locker).filter(Locker.id == locker_id).first()
     if not locker:
         raise HTTPException(status_code=404, detail="柜格不存在")
+    if not locker.is_abnormal:
+        raise HTTPException(status_code=400, detail="柜格当前无异常，无需恢复")
+    pending_order = (
+        db.query(Order)
+        .filter(
+            Order.locker_id == locker.id,
+            Order.status.in_([
+                OrderStatus.created, OrderStatus.dropped,
+                OrderStatus.received, OrderStatus.washing,
+                OrderStatus.done, OrderStatus.returned,
+            ]),
+        )
+        .order_by(Order.created_at.desc())
+        .first()
+    )
+    if pending_order:
+        return {
+            "ok": False,
+            "locker_id": locker.id,
+            "locker_no": locker.locker_no,
+            "reason": "柜格内有未完成订单，暂不可恢复",
+            "order_id": pending_order.id,
+            "order_no": pending_order.order_no,
+            "order_status": pending_order.status,
+            "user_phone": pending_order.user_phone,
+        }
+    old_type = locker.abnormal_type
     locker.is_abnormal = False
     locker.abnormal_type = None
     if locker.status == LockerStatus.maintenance:
@@ -191,7 +218,14 @@ def restore_locker(locker_id: int, req: LockerRestoreRequest, db: Session = Depe
         locker.abnormal_note = (locker.abnormal_note or "") + f" | 恢复备注: {req.note}"
     db.commit()
     db.refresh(locker)
-    return locker
+    return {
+        "ok": True,
+        "locker_id": locker.id,
+        "locker_no": locker.locker_no,
+        "status": locker.status,
+        "is_abnormal": locker.is_abnormal,
+        "old_abnormal_type": old_type,
+    }
 
 
 @router.post("/orders/{order_id}/fees", response_model=FeeItemOut, summary="追加费用明细")

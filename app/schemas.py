@@ -211,3 +211,66 @@ class RetentionHandleResult(BaseModel):
 
 class RetentionResolveRequest(BaseModel):
     note: Optional[str] = None
+
+
+class LockerDetailOut(BaseModel):
+    id: int
+    store_id: int
+    locker_no: str
+    size: LockerSize
+    status: LockerStatus
+    is_abnormal: bool
+    abnormal_type: Optional[LockerAbnormalType] = None
+    abnormal_note: Optional[str] = None
+    abnormal_at: Optional[datetime] = None
+    order_id: Optional[int] = None
+    order_no: Optional[str] = None
+    order_status: Optional[OrderStatus] = None
+    stay_minutes: Optional[float] = None
+    user_phone: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class LockerDashboardItem(BaseModel):
+    store_id: int
+    store_name: str
+    total: int
+    available: int
+    normal_occupied: int
+    fault: int
+    occupied_abnormal: int
+    pending_pickup: int
+
+
+class TimelineNode(BaseModel):
+    key: str
+    label: str
+    time: Optional[datetime] = None
+    done: bool
+
+
+class OrderTimelineOut(BaseModel):
+    order_id: int
+    order_no: str
+    current_status: OrderStatus
+    nodes: list[TimelineNode]
+
+
+class StuckOrderQuery(BaseModel):
+    stuck_at: Optional[str] = None
+    store_id: Optional[int] = None
+    min_hours: Optional[float] = 0.0
+
+
+class DailyCompletionOut(BaseModel):
+    store_id: int
+    store_name: str
+    dropped_count: int
+    picked_up_count: int
+    pending_pickup_count: int
+    timeout_cancelled_count: int
+    fault_locker_count: int
+    occupied_abnormal_count: int
+    retention_count: int
+    date: str

@@ -1,4 +1,5 @@
-from app.models import LockerSize, FeeType
+from datetime import datetime
+from app.models import LockerSize, FeeType, OrderStatus
 
 
 SIZE_BASE_PRICE = {
@@ -58,3 +59,62 @@ def enrich_order_dict(order):
         "cancelled_at": order.cancelled_at,
     }
     return data
+
+
+TIMELINE_NODES = [
+    ("created", "订单创建", "created_at"),
+    ("dropped", "用户投递", "dropped_at"),
+    ("received", "门店收衣", "received_at"),
+    ("washing", "清洗中", "washing_at"),
+    ("done", "清洗完成", "done_at"),
+    ("returned", "放回柜格", "returned_at"),
+    ("reminded", "待取提醒", None),
+    ("picked_up", "用户取件", "picked_up_at"),
+]
+
+
+def build_timeline(order):
+    nodes = []
+    reached = True
+    node_set_done = set()
+    for key, label, attr in TIMELINE_NODES:
+        if key == "reminded":
+            t = order.returned_at if order.pickup_reminded else None
+            done = order.pickup_reminded
+        else:
+            t = getattr(order, attr) if attr else None
+            done = t is not None
+        nodes.append({
+            "key": key,
+            "label": label,
+            "time": t,
+            "done": done,
+        })
+        if key in ("created", "dropped", "received", "washing", "done", "returned", "picked_up"):
+            if not done:
+                reached = False
+    return {
+        "order_id": order.id,
+        "order_no": order.order_no,
+        "current_status": order.status,
+        "nodes": nodes,
+    }
+
+
+def get_stuck_time(order):
+    """返回订单在当前状态停留的分钟数"""
+    status_time_map = {
+        OrderStatus.created: "created_at",
+        OrderStatus.dropped: "dropped_at",
+        OrderStatus.received: "received_at",
+        OrderStatus.washing: "washing_at",
+        OrderStatus.done: "done_at",
+        OrderStatus.returned: "returned_at",
+    }
+    attr = status_time_map.get(order.status)
+    if not attr:
+        return 0.0
+    t = getattr(order, attr)
+    if not t:
+        return 0.0
+    return (datetime.utcnow() - t).total_seconds() / 60.0

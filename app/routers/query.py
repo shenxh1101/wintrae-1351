@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Order, FeeItem, OrderLog, OrderStatus
-from app.schemas import OrderOut, FeeItemOut, OrderLogOut, FeeSummaryOut
-from app.services.utils import enrich_order_dict
+from app.schemas import OrderOut, FeeItemOut, OrderLogOut, FeeSummaryOut, OrderTimelineOut
+from app.services.utils import enrich_order_dict, build_timeline
 
 router = APIRouter(prefix="/query", tags=["用户查询"])
 
@@ -61,3 +61,11 @@ def get_order_logs(order_id: int, db: Session = Depends(get_db)):
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
     return db.query(OrderLog).filter(OrderLog.order_id == order_id).order_by(OrderLog.created_at).all()
+
+
+@router.get("/orders/{order_id}/timeline", response_model=OrderTimelineOut, summary="订单履约时间线")
+def get_order_timeline(order_id: int, db: Session = Depends(get_db)):
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+    return build_timeline(order)
